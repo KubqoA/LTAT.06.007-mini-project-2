@@ -3,6 +3,8 @@ import rpyc
 import _thread
 from typing import Callable, Dict, List, Literal, Optional, TypeVar
 
+general_ports: List[int] = []
+
 R = TypeVar("R")
 Property = Literal["id", "role", "majority", "state"]
 Role = Literal["primary", "secondary"]
@@ -50,16 +52,16 @@ class General:
         self.server: Optional[rpyc.ThreadedServer] = None
 
     def start(self) -> None:
-        _thread.start_new_thread(self.run, ())
+        _thread.start_new_thread(self._run, ())
 
     def stop(self) -> None:
-        _thread.start_new_thread(self.kill, ())
+        _thread.start_new_thread(self._kill, ())
 
-    def run(self) -> None:
+    def _run(self) -> None:
         self.server = rpyc.ThreadedServer(GeneralService(self), port=self.port)
         self.server.start()
 
-    def kill(self) -> None:
+    def _kill(self) -> None:
         if self.server is None:
             return
         sleep(1)

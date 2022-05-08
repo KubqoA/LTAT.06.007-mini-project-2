@@ -1,19 +1,20 @@
-from functools import partial
 import general
+from general import general_ports
 import sys
 from typing import Callable, Dict, List, cast
 
 
-def create_generals(count: int, base_port: int = 18812) -> List[int]:
+def create_generals(count: int, base_port: int = 18812) -> None:
     """Create generals and start them"""
+    global general_ports
+
     # Start all the generals
-    ports = [base_port + id for id in range(0, count)]
-    for id, port in enumerate(ports):
+    general_ports = [base_port + id for id in range(0, count)]
+    for id, port in enumerate(general_ports):
         general.General(id + 1, port).start()
-    return ports
 
 
-def list_generals(general_ports: List[int], properties: List[general.Property]) -> None:
+def list_generals(properties: List[general.Property]) -> None:
     """List the generals and their properties from the list of properties"""
     for port in general_ports:
         print(
@@ -24,7 +25,7 @@ def list_generals(general_ports: List[int], properties: List[general.Property]) 
         )
 
 
-def actual_order(general_ports: List[int], args: List[str]) -> None:
+def actual_order(args: List[str]) -> None:
     # Validate args
     if len(args) != 1 or args[0] not in ["attack", "retreat"]:
         print("Usage: actual-order [attack/retreat]")
@@ -33,14 +34,14 @@ def actual_order(general_ports: List[int], args: List[str]) -> None:
 
     # TODO: Order logic
 
-    list_generals(general_ports, ["id", "role", "majority", "state"])
+    list_generals(["id", "role", "majority", "state"])
 
 
-def g_state(general_ports: List[int], args: List[str]) -> None:
+def g_state(args: List[str]) -> None:
     # Validate args
     if len(args) == 0:
         # If no args were passed just list the generals
-        list_generals(general_ports, ["id", "role", "state"])
+        list_generals(["id", "role", "state"])
         return
     if (
         len(args) != 2
@@ -57,13 +58,15 @@ def g_state(general_ports: List[int], args: List[str]) -> None:
 
         if general_id == id:
             general.rpyc_exec(port, lambda conn: conn.root.exposed_set_state(state))
-            list_generals(general_ports, ["id", "state"])
+            list_generals(["id", "state"])
             return
 
     print(f"General with id {id} doesn't exist")
 
 
-def g_kill(general_ports: List[int], args: List[str]) -> None:
+def g_kill(args: List[str]) -> None:
+    global general_ports
+
     # Validate args
     if len(args) != 1 or not args[0].isdigit():
         print("Usage: g-kill [ID]")
@@ -76,13 +79,15 @@ def g_kill(general_ports: List[int], args: List[str]) -> None:
         if general_id == id:
             general.rpyc_exec(port, lambda conn: conn.root.exposed_stop())
             general_ports.pop(i)
-            list_generals(general_ports, ["id", "state"])
+            list_generals(["id", "state"])
             return
 
     print(f"General with id {id} doesn't exist")
 
 
-def g_add(general_ports: List[int], args: List[str]) -> None:
+def g_add(args: List[str]) -> None:
+    global general_ports
+
     # Validate args
     if len(args) != 1 or not args[0].isdigit():
         print("Usage: g-add [K]")
@@ -94,12 +99,10 @@ def g_add(general_ports: List[int], args: List[str]) -> None:
     )
 
     for i in range(k):
-        # mutates the original list - so this change propagates outside
-        # this function, which in this case is a desired side-effect
         general_ports.append(general_ports[-1] + 1)
         general.General(last_id + i + 1, general_ports[-1]).start()
 
-    list_generals(general_ports, ["id", "role"])
+    list_generals(["id", "role"])
 
 
 def main() -> None:
@@ -114,7 +117,7 @@ def main() -> None:
         sys.exit(1)
 
     print(f"Creating {n} generals")
-    general_ports = create_generals(n)
+    create_generals(n)
 
     # Start= the command line interface
     while True:
@@ -140,10 +143,10 @@ def main() -> None:
             ),
             "exit": lambda _: sys.exit(0),
             "whoami": lambda _: print("Jakub Arbet, C20301"),
-            "actual-order": partial(actual_order, general_ports),
-            "g-state": partial(g_state, general_ports),
-            "g-kill": partial(g_kill, general_ports),
-            "g-add": partial(g_add, general_ports),
+            "actual-order": actual_order,
+            "g-state": g_state,
+            "g-kill": g_kill,
+            "g-add": g_add,
         }
 
         # Execute appropriate handler or print error message
