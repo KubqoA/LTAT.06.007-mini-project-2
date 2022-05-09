@@ -43,11 +43,14 @@ class GeneralService(rpyc.Service):  # type: ignore
     def exposed_get_id(self) -> int:
         return self.general.id
 
+    def exposed_get_state(self) -> State:
+        return self.general.state
+
     def exposed_set_state(self, state: State) -> None:
         self.general.state = state
 
-    def exposed_stop(self) -> None:
-        return self.general.stop()
+    def exposed_get_primary_general_port(self) -> Optional[int]:
+        return self.general.primary_general_port
 
     def exposed_is_alive(self) -> bool:
         return self.general.is_alive()
@@ -57,17 +60,17 @@ class GeneralService(rpyc.Service):  # type: ignore
     ) -> Optional[Message]:
         return self.general.process_message(sender_port, sender_id, message)
 
-    def exposed_get_primary_general_port(self) -> Optional[int]:
-        return self.general.primary_general_port
+    def exposed_send_order(self, sender_port: int, order: Order) -> None:
+        return self.general.process_order(sender_port, order)
 
     def exposed_execute_order(self, order: Order) -> str:
         return self.general.execute_order(order)
 
-    def exposed_get_state(self) -> State:
-        return self.general.state
-
     def exposed_report_consensus(self, consensus: Optional[Order]) -> None:
         self.general.receive_consensus(consensus)
+
+    def exposed_stop(self) -> None:
+        return self.general.stop()
 
 
 class General:
@@ -191,15 +194,10 @@ class General:
     def is_alive(self) -> bool:
         return self.server is not None
 
-    def mutate_order(self, order: Order) -> Order:
-        if self.state == "non-faulty" or randint(1, 10) % 2 == 0:
-            return order
-
-        return "attack" if order == "retreat" else "retreat"
-
     def process_message(
         self, sender_port: int, sender_id: int, message: Message
     ) -> Optional[Message]:
+        """Process message related to primary general election"""
         if not self.server or not self.server.active:
             return None
 
@@ -213,28 +211,35 @@ class General:
         if message == "election" and sender_id < self.id:
             return "ok"
 
-        if message == "attack":
+        return None
+
+    def mutate_order(self, order: Order) -> Order:
+        """If the general is faulty mutate order in approx. half the cases"""
+        if self.state == "non-faulty" or randint(1, 10) % 2 == 0:
+            return order
+
+        return "attack" if order == "retreat" else "retreat"
+
+    def process_order(self, sender_port: int, order: Order) -> None:
+        if order == "attack":
             self.consensus.append("attack")
 
-        if message == "retreat":
+        if order == "retreat":
             self.consensus.append("retreat")
 
-        if (
-            message == "attack" or message == "retreat"
-        ) and sender_port == self.primary_general_port:
-            print(f"Received order {message} from primary general")
+        if sender_port == self.primary_general_port:
             for port in general_ports:
                 if port == self.port or port == self.primary_general_port:
                     continue
 
                 rpyc_exec(
                     port,
-                    lambda conn: conn.exposed_send_message(
-                        self.port, self.id, self.mutate_order(cast(Order, message))
+                    lambda conn: conn.exposed_send_order(
+                        self.port, self.mutate_order(order)
                     ),
                 )
 
-        if (message == "attack" or message == "retreat") and self.has_consensus():
+        if self.has_consensus():
             assert self.primary_general_port is not None
             self.majority = self.get_majority()
             rpyc_exec(
@@ -242,8 +247,6 @@ class General:
                 lambda conn: conn.exposed_report_consensus(self.majority[0]),
             )
             self.consensus = []
-
-        return None
 
     def list(self, properties: List[Property]) -> str:
         getters: Dict[Property, Callable[[], str]] = {
@@ -263,6 +266,8 @@ class General:
         self.order = order
         faulty_generals = 0
 
+        # Send the order to each secondary general and count the number
+        # faulty generals while doing so
         for port in general_ports:
             if port == self.port:
                 continue
@@ -272,8 +277,9 @@ class General:
             if state == "faulty":
                 faulty_generals += 1
 
-            conn.exposed_send_message(self.port, self.id, self.mutate_order(order))
+            conn.exposed_send_order(self.port, self.mutate_order(order))
 
+        # Wait till we reach consensus
         while not self.has_consensus():
             sleep(1)
 
