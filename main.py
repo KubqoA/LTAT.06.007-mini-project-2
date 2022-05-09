@@ -1,7 +1,19 @@
+from collections import Counter
+from random import randint
 import sys
 from time import sleep
 import _thread
-from typing import Callable, Dict, List, Literal, Optional, TypeVar, cast
+from typing import (
+    Callable,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    Tuple,
+    TypeVar,
+    Union,
+    cast,
+)
 import rpyc
 
 general_ports: List[int] = []
@@ -12,18 +24,12 @@ Role = Literal["primary", "secondary"]
 Order = Literal["attack", "retreat"]
 State = Literal["faulty", "non-faulty"]
 
-Message = Literal["election", "ok", "coordinator"]
+Message = Union[Literal["election", "ok", "coordinator"], Order]
 
 
-def rpyc_exec(port: int, fn: Callable[["GeneralServiceType"], R]) -> R:
+def rpyc_exec(port: int, fn: Callable[["GeneralService"], R]) -> R:
     conn = rpyc.connect("localhost", port)
-    return fn(conn)
-
-
-class GeneralServiceType:
-    """Class to help with typing when referencing to the exposed functions"""
-
-    root: "GeneralService"
+    return fn(conn.root)
 
 
 class GeneralService(rpyc.Service):  # type: ignore
@@ -51,15 +57,28 @@ class GeneralService(rpyc.Service):  # type: ignore
     ) -> Optional[Message]:
         return self.general.process_message(sender_port, sender_id, message)
 
+    def exposed_get_primary_general_port(self) -> Optional[int]:
+        return self.general.primary_general_port
+
+    def exposed_execute_order(self, order: Order) -> str:
+        return self.general.execute_order(order)
+
+    def exposed_get_state(self) -> State:
+        return self.general.state
+
+    def exposed_report_consensus(self, consensus: Optional[Order]) -> None:
+        self.general.receive_consensus(consensus)
+
 
 class General:
     def __init__(self, id: int, port: int) -> None:
         self.id = id
         self.port = port
         self.role: Role = "secondary"
-        self.order: Optional[Order] = None
-        self.majority: Optional[Order] = None
         self.state: State = "non-faulty"
+
+        self.consensus: List[Optional[Order]] = []
+        self.majority: Tuple[Optional[Order], int] = (None, 0)
 
         self.primary_general_port: Optional[int] = None
 
@@ -90,7 +109,7 @@ class General:
                 try:
                     primary_general_alive = rpyc_exec(
                         self.primary_general_port,
-                        lambda conn: conn.root.exposed_is_alive(),
+                        lambda conn: conn.exposed_is_alive(),
                     )
                     if not primary_general_alive:
                         self.primary_general_port = None
@@ -115,7 +134,7 @@ class General:
             try:
                 election_response = rpyc_exec(
                     port,
-                    lambda conn: conn.root.exposed_send_message(
+                    lambda conn: conn.exposed_send_message(
                         self.port, self.id, "election"
                     ),
                 )
@@ -151,7 +170,7 @@ class General:
             try:
                 rpyc_exec(
                     port,
-                    lambda conn: conn.root.exposed_send_message(
+                    lambda conn: conn.exposed_send_message(
                         self.port, self.id, "coordinator"
                     ),
                 )
@@ -172,6 +191,12 @@ class General:
     def is_alive(self) -> bool:
         return self.server is not None
 
+    def mutate_order(self, order: Order) -> Order:
+        if self.state == "non-faulty" or randint(1, 10) % 2 == 0:
+            return order
+
+        return "attack" if order == "retreat" else "retreat"
+
     def process_message(
         self, sender_port: int, sender_id: int, message: Message
     ) -> Optional[Message]:
@@ -188,6 +213,36 @@ class General:
         if message == "election" and sender_id < self.id:
             return "ok"
 
+        if message == "attack":
+            self.consensus.append("attack")
+
+        if message == "retreat":
+            self.consensus.append("retreat")
+
+        if (
+            message == "attack" or message == "retreat"
+        ) and sender_port == self.primary_general_port:
+            print(f"Received order {message} from primary general")
+            for port in general_ports:
+                if port == self.port or port == self.primary_general_port:
+                    continue
+
+                rpyc_exec(
+                    port,
+                    lambda conn: conn.exposed_send_message(
+                        self.port, self.id, self.mutate_order(cast(Order, message))
+                    ),
+                )
+
+        if (message == "attack" or message == "retreat") and self.has_consensus():
+            assert self.primary_general_port is not None
+            self.majority = self.get_majority()
+            rpyc_exec(
+                self.primary_general_port,
+                lambda conn: conn.exposed_report_consensus(self.majority[0]),
+            )
+            self.consensus = []
+
         return None
 
     def list(self, properties: List[Property]) -> str:
@@ -195,11 +250,56 @@ class General:
             "id": lambda: f"G{self.id}",
             "role": lambda: self.role,
             "majority": lambda: "majority=undefined"
-            if self.majority is None
-            else f"majority={self.majority}",
+            if self.majority[0] is None
+            else f"majority={self.majority[0]}",
             "state": lambda: "state=F" if self.state == "faulty" else "state=NF",
         }
         return ", ".join(map(lambda property: getters[property](), properties))
+
+    def execute_order(self, order: Order) -> str:
+        if self.role != "primary":
+            return "Cannot execute order from a secondary general"
+
+        self.order = order
+        faulty_generals = 0
+
+        for port in general_ports:
+            if port == self.port:
+                continue
+
+            conn: GeneralService = rpyc.connect("localhost", port).root
+            state = conn.exposed_get_state()
+            if state == "faulty":
+                faulty_generals += 1
+
+            conn.exposed_send_message(self.port, self.id, self.mutate_order(order))
+
+        while not self.has_consensus():
+            sleep(1)
+
+        total_generals = len(general_ports)
+        min_quorum = (total_generals // 2) + 1
+        required_generals = 3 * faulty_generals + 1
+
+        self.majority = self.get_majority()
+        self.consensus = []
+
+        if required_generals > total_generals or self.majority[0] is None:
+            return f"Execute order: cannot be determined - not enough generals in the system! {faulty_generals} faulty node(s) in the system - {min_quorum} out of {total_generals} quorum not consistent"
+
+        if faulty_generals == 0:
+            return f"Execute order: {self.majority[0]}! Non-faulty nodes in the system - {min_quorum} out of {total_generals} quorum suggest attack"
+
+        return f"Execute order: {self.majority[0]}! {faulty_generals} faulty node(s) in the system - {min_quorum} out of {total_generals} quorum suggest retreat"
+
+    def has_consensus(self) -> bool:
+        return len(self.consensus) == len(general_ports) - 1
+
+    def get_majority(self) -> Tuple[Optional[Order], int]:
+        return Counter(self.consensus).most_common(1)[0]
+
+    def receive_consensus(self, consensus: Optional[Order]) -> None:
+        self.consensus.append(consensus)
 
 
 def create_generals(count: int, base_port: int = 18812) -> None:
@@ -218,7 +318,7 @@ def list_generals(properties: List[Property]) -> None:
         print(
             rpyc_exec(
                 port,
-                lambda conn: conn.root.exposed_list(properties),
+                lambda conn: conn.exposed_list(properties),
             )
         )
 
@@ -229,10 +329,27 @@ def actual_order(args: List[str]) -> None:
         print("Usage: actual-order [attack/retreat]")
         return
     order = cast(Order, args[0])
+    primary_general_port: Optional[int] = None
 
-    # TODO: Order logic
+    for port in general_ports:
+        try:
+            primary_general_port = rpyc_exec(
+                port, lambda conn: conn.exposed_get_primary_general_port()
+            )
+            break
+        except ConnectionError:
+            pass
+
+    if primary_general_port is None:
+        print("No primary general is elected, try again later.")
+        return
+
+    result = rpyc_exec(
+        primary_general_port, lambda conn: conn.exposed_execute_order(order)
+    )
 
     list_generals(["id", "role", "majority", "state"])
+    print(result)
 
 
 def g_state(args: List[str]) -> None:
@@ -252,10 +369,10 @@ def g_state(args: List[str]) -> None:
     state = cast(State, args[1])
 
     for port in general_ports:
-        general_id = rpyc_exec(port, lambda conn: conn.root.exposed_get_id())
+        general_id = rpyc_exec(port, lambda conn: conn.exposed_get_id())
 
         if general_id == id:
-            rpyc_exec(port, lambda conn: conn.root.exposed_set_state(state))
+            rpyc_exec(port, lambda conn: conn.exposed_set_state(state))
             list_generals(["id", "state"])
             return
 
@@ -272,10 +389,10 @@ def g_kill(args: List[str]) -> None:
     id = int(args[0])
 
     for i, port in enumerate(general_ports):
-        general_id = rpyc_exec(port, lambda conn: conn.root.exposed_get_id())
+        general_id = rpyc_exec(port, lambda conn: conn.exposed_get_id())
 
         if general_id == id:
-            rpyc_exec(port, lambda conn: conn.root.exposed_stop())
+            rpyc_exec(port, lambda conn: conn.exposed_stop())
             general_ports.pop(i)
             list_generals(["id", "state"])
             return
@@ -292,7 +409,7 @@ def g_add(args: List[str]) -> None:
         return
     k = int(args[0])
 
-    last_id = rpyc_exec(general_ports[-1], lambda conn: conn.root.exposed_get_id())
+    last_id = rpyc_exec(general_ports[-1], lambda conn: conn.exposed_get_id())
 
     for i in range(k):
         general_ports.append(general_ports[-1] + 1)
