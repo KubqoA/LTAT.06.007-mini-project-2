@@ -61,8 +61,6 @@ class General:
         self.majority: Optional[Order] = None
         self.state: State = "non-faulty"
 
-        # Leader election related
-        self.elections: int = 0
         self.primary_general_port: Optional[int] = None
 
         self.server: Optional[rpyc.ThreadedServer] = None
@@ -96,7 +94,7 @@ class General:
                     )
                     if not primary_general_alive:
                         self.primary_general_port = None
-                except rpyc.GenericException:
+                except ConnectionError:
                     # If we get an exception assume the primary general is
                     # no longer alive
                     self.primary_general_port = None
@@ -110,7 +108,7 @@ class General:
         # Send election message to all other generals
         # If they don't respond or the connection cannot be established
         # consider it as an election vote for this general
-        for port in general_ports:
+        for port in general_ports[::-1]:
             if port == self.port:
                 continue
 
@@ -122,8 +120,10 @@ class General:
                     ),
                 )
 
+                # No response means a vote for this general continue
+                # with a message for the next one
                 if election_response is None:
-                    self.elections += 1
+                    continue
 
                 # If the asked general is already primary then it will send
                 # the coordinator response and we set mark the port
@@ -131,31 +131,32 @@ class General:
                 if election_response == "coordinator":
                     self.primary_general_port = port
                     return
-            except rpyc.GenericException:
-                self.elections += 1
 
-        # If this general now haves the required election votes propagate
-        # the result with coordinator message to other generals
-        if self.elections == len(general_ports) - 1:
-            self.role = "primary"
-            self.primary_general_port = self.port
+                # If the response is ok we know this general won't win the
+                # election and we can stop the process here
+                if election_response == "ok":
+                    return
+            except ConnectionError:
+                pass
 
-            for port in general_ports:
-                if port == self.port:
-                    continue
+        # If we get here it means this general has votes from every other
+        # general and can now propagate itself as the primary/coordinator
+        self.role = "primary"
+        self.primary_general_port = self.port
 
-                try:
-                    rpyc_exec(
-                        port,
-                        lambda conn: conn.root.exposed_send_message(
-                            self.port, self.id, "coordinator"
-                        ),
-                    )
-                except rpyc.GenericException:
-                    pass
+        for port in general_ports:
+            if port == self.port:
+                continue
 
-        # Reset the elections counter to 0, for next election cycle
-        self.elections = 0
+            try:
+                rpyc_exec(
+                    port,
+                    lambda conn: conn.root.exposed_send_message(
+                        self.port, self.id, "coordinator"
+                    ),
+                )
+            except ConnectionError:
+                pass
 
     def _kill(self) -> None:
         if self.server is None:
