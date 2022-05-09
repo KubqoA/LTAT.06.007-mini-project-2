@@ -130,7 +130,7 @@ class General:
         # Send election message to all other generals
         # If they don't respond or the connection cannot be established
         # consider it as an election vote for this general
-        for port in general_ports[::-1]:
+        for port in general_ports:
             if port == self.port:
                 continue
 
