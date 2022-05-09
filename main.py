@@ -1,8 +1,8 @@
 import sys
 from time import sleep
-import rpyc
 import _thread
 from typing import Callable, Dict, List, Literal, Optional, TypeVar, cast
+import rpyc
 
 general_ports: List[int] = []
 
@@ -20,8 +20,9 @@ def rpyc_exec(port: int, fn: Callable[["GeneralServiceType"], R]) -> R:
     return fn(conn)
 
 
-# Class to help with typing when referencing to the exposed functions
 class GeneralServiceType:
+    """Class to help with typing when referencing to the exposed functions"""
+
     root: "GeneralService"
 
 
@@ -95,7 +96,7 @@ class General:
                     )
                     if not primary_general_alive:
                         self.primary_general_port = None
-                except:
+                except rpyc.GenericException:
                     # If we get an exception assume the primary general is
                     # no longer alive
                     self.primary_general_port = None
@@ -130,7 +131,7 @@ class General:
                 if election_response == "coordinator":
                     self.primary_general_port = port
                     return
-            except:
+            except rpyc.GenericException:
                 self.elections += 1
 
         # If this general now haves the required election votes propagate
@@ -150,7 +151,7 @@ class General:
                             self.port, self.id, "coordinator"
                         ),
                     )
-                except:
+                except rpyc.GenericException:
                     pass
 
         # Reset the elections counter to 0, for next election cycle
